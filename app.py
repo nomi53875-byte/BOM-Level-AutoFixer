@@ -3,10 +3,15 @@ import pandas as pd
 import re
 
 # ==========================================
-# 1. 核心資料讀取模組 (解析 Master 作為標準答案)
+# 初始化 Session State (用來控制清除按鈕)
+# ==========================================
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+# ==========================================
+# 1. 核心資料讀取模組
 # ==========================================
 def parse_bom_stable_logic(file_bytes):
-    """將 BOM 解析為以 Ref Des 為 Key 的字典"""
     try: 
         text = file_bytes.decode("big5")
     except: 
@@ -41,7 +46,7 @@ def parse_bom_stable_logic(file_bytes):
     return ref_map
 
 # ==========================================
-# 2. 修正模組：逐行掃描 Target 並無損替換階層
+# 2. 修正模組
 # ==========================================
 def auto_correct_bom(master_map, target_bytes):
     try: 
@@ -81,7 +86,6 @@ def auto_correct_bom(master_map, target_bytes):
                             break 
                 
                 if needs_correction:
-                    # 🚀 核心修正魔法：只替換行首的那個數字
                     new_line = re.sub(r'^\d', str(correct_level), line, count=1)
                     corrected_lines.append(new_line)
                     
@@ -105,16 +109,30 @@ def main():
     st.set_page_config(page_title="BOM 階層智能修正工具", layout="wide")
     st.title("✨ BOM 階層智能修正工具")
     st.markdown("上傳基準 BOM 與待修 BOM。系統會自動揪出「位置與料號都對，但階層打錯」的行，並直接幫你修正產生新檔案。")
+    
+    # 頂部加入清除按鈕
+    col_btn, _ = st.columns([1, 4])
+    with col_btn:
+        if st.button("🗑️ 清除所有檔案，重新開始", use_container_width=True):
+            st.session_state.uploader_key += 1 # 改變 key，強制清空上傳元件
+            st.rerun() # 重新載入畫面
+            
     st.divider()
 
-    # 左右兩個上傳區塊
+    # 左右兩個上傳區塊 (移除 type 限制，並加上動態 key)
     col1, col2 = st.columns(2)
     with col1:
-        master_file = st.file_uploader("📂 1. 上傳 基準 BOM (Master - 標準答案)", type=["txt", "csv"])
+        master_file = st.file_uploader(
+            "📂 1. 上傳 基準 BOM (Master - 標準答案)", 
+            key=f"master_{st.session_state.uploader_key}"
+        )
         st.info(f"👉 基準檔案狀態：{'✅ 已讀取' if master_file else '❌ 未讀取'}")
         
     with col2:
-        target_file = st.file_uploader("📂 2. 上傳 待修 BOM (Target - 要被修正的檔案)", type=["txt", "csv"])
+        target_file = st.file_uploader(
+            "📂 2. 上傳 待修 BOM (Target - 要被修正的檔案)", 
+            key=f"target_{st.session_state.uploader_key}"
+        )
         st.info(f"👉 待修檔案狀態：{'✅ 已讀取' if target_file else '❌ 未讀取'}")
 
     st.divider()
