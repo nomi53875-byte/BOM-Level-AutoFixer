@@ -26,7 +26,9 @@ def parse_bom_stable_logic(file_bytes):
             parts = re.split(r'\s{2,}', line.strip())
             desc = parts[3] if len(parts) > 3 else ""
             ref_raw = parts[-1] if len(parts) > 4 else ""
-            if qty <= 0: continue
+            
+            if qty <= 0: continue # 基準檔解析時，略過替代料
+                
             raw_refs = [re.sub(r'\(.*?\)\d*', '', r).strip() for r in ref_raw.split('.') if r.strip()]
             valid_refs = [r for r in raw_refs if re.match(r'^[A-Z]+\d+', r)]
             current_info = {"Level": level, "PN": pn, "Desc": desc}
@@ -38,7 +40,7 @@ def parse_bom_stable_logic(file_bytes):
     return ref_map
 
 # ==========================================
-# 2. 修正與 ECO 監測模組
+# 2. 修正與 ECO 監測模組 (加入替代料連動邏輯)
 # ==========================================
 def process_bom_with_eco_monitor(master_map, target_bytes):
     try: 
@@ -50,13 +52,19 @@ def process_bom_with_eco_monitor(master_map, target_bytes):
         
     lines = target_text.splitlines()
     corrected_lines = []
-    fix_log = []   # 存放自動修正的項目
-    eco_log = []   # 存放疑似 ECO 的變更項目
+    fix_log = []   
+    eco_log = []   
+    
+    # 🌟 新增記憶體：記住上一個主料的階層與料號
+    last_main_part_level = None
+    last_main_part_pn = None
     
     for line in lines:
         match = re.match(r'^(\d)\s+(\S+)\s+([\d.]+)', line)
         if match:
             t_level, t_pn, qty = int(match.group(1)), match.group(2), float(match.group(3))
+            
+            # --- 【情況 A】這是一般料 / 主料 (數量 > 0) ---
             if qty > 0:
                 parts = re.split(r'\s{2,}', line.strip())
                 ref_raw = parts[-1] if len(parts) > 4 else ""
@@ -64,23 +72,24 @@ def process_bom_with_eco_monitor(master_map, target_bytes):
                 valid_refs = [r for r in raw_refs if re.match(r'^[A-Z]+\d+', r)]
                 
                 is_fixed = False
+                correct_level = t_level # 預設為原階層
+                
                 for r in valid_refs:
                     if r in master_map:
                         m_info = master_map[r]
-                        # 情況 A：料號相同，但階層不同 -> 自動修正
                         if m_info["PN"] == t_pn:
-                            if m_info["Level"] != t_level:
-                                new_line = re.sub(r'^\d', str(m_info["Level"]), line, count=1)
+                            correct_level = m_info["Level"] # 找到標準答案
+                            if correct_level != t_level:
+                                new_line = re.sub(r'^\d', str(correct_level), line, count=1)
                                 corrected_lines.append(new_line)
                                 fix_log.append({
                                     "位置 (Ref)": r,
                                     "料號 (PN)": t_pn,
                                     "❌ 原階層": t_level,
-                                    "✅ 修正後": m_info["Level"]
+                                    "✅ 修正後": correct_level
                                 })
                                 is_fixed = True
                                 break
-                        # 情況 B：料號不同 -> 疑似 ECO 變更
                         else:
                             eco_log.append({
                                 "位置 (Ref)": r,
@@ -90,7 +99,27 @@ def process_bom_with_eco_monitor(master_map, target_bytes):
                                 "待修階層": t_level,
                                 "狀態": "⚠️ 料號變動 (疑似 ECO)"
                             })
-                if is_fixed: continue # 已修正則跳過後續處理
+                
+                # 🌟 核心魔法：把這顆主料最終的正確階層記下來，準備給它下面的替代料用
+                last_main_part_level = correct_level
+                last_main_part_pn = t_pn
+                
+                if is_fixed: continue 
+
+            # --- 【情況 B】這是替代料 (數量為 0) ---
+            else:
+                if last_main_part_level is not None:
+                    # 如果替代料的階層跟主料大哥不一樣，強制連動修正！
+                    if t_level != last_main_part_level:
+                        new_line = re.sub(r'^\d', str(last_main_part_level), line, count=1)
+                        corrected_lines.append(new_line)
+                        fix_log.append({
+                            "位置 (Ref)": f"🔄 替代料連動 (主料: {last_main_part_pn})",
+                            "料號 (PN)": t_pn,
+                            "❌ 原階層": t_level,
+                            "✅ 修正後": last_main_part_level
+                        })
+                        continue 
         
         corrected_lines.append(line)
         
@@ -103,7 +132,7 @@ def process_bom_with_eco_monitor(master_map, target_bytes):
 def main():
     st.set_page_config(page_title="BOM 智能修正與 ECO 監控工具", layout="wide")
     st.title("🎯 BOM 智能修正與 ECO 監控工具")
-    st.markdown("以位置為對齊基礎，自動修正階層錯誤，並主動列舉疑似 ECO 的料號變動項目。")
+    st.markdown("以位置為對齊基礎，自動修正階層錯誤，並主動列舉疑似 ECO，**支援替代料階層自動連動主料**。")
     
     col_btn, _ = st.columns([1, 4])
     with col_btn:
@@ -132,16 +161,15 @@ def main():
                 # --- 第一部分：自動修正結果 ---
                 st.subheader("✅ 階層自動修正紀錄")
                 if fix_log:
-                    st.success(f"已自動修正 {len(fix_log)} 處階層錯誤。")
+                    st.success(f"已自動修正 {len(fix_log)} 處階層錯誤 (含替代料連動)。")
                     st.dataframe(pd.DataFrame(fix_log), use_container_width=True)
                 else:
                     st.info("未發現單純的階層錯誤。")
 
-                # --- 第二部分：疑似 ECO 變更監控 (重點！) ---
+                # --- 第二部分：疑似 ECO 變更監控 ---
                 st.subheader("🔍 疑似 ECO 變更監控")
                 if eco_log:
                     st.warning(f"偵測到 {len(eco_log)} 處位置發生料號變動，請核對 ECO 內容。")
-                    # 移除重複的位置紀錄 (因為一個零件行可能有複數 Ref)
                     df_eco = pd.DataFrame(eco_log).drop_duplicates(subset=["位置 (Ref)"])
                     st.dataframe(df_eco, use_container_width=True)
                 else:
